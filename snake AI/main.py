@@ -1,199 +1,353 @@
 import sys
+import math
 import pygame
 
 from snake import Snake, Food
-
 from setting import (
     CELL_SIZE, COLS, ROWS, PANEL_WIDTH,
     WINDOW_W, WINDOW_H,
     FPS_OPTIONS, DEFAULT_FPS,
     BG_COLOR, GRID_COLOR, SNAKE_HEAD_COLOR, SNAKE_BODY_COLOR,
-    FOOD_COLOR,
-    PANEL_BG, TEXT_COLOR, ACCENT_COLOR,
-    ALGO_BFS, ALGO_ASTAR, DEFAULT_ALGO,
-    KEY_TOGGLE_ALGO,
-    KEY_SPEED_UP, KEY_SPEED_DOWN, KEY_RESTART,
+    FOOD_COLOR, PANEL_BG, TEXT_COLOR, ACCENT_COLOR,
+    ALGO_BFS, ALGO_ASTAR, ALGO_DFS, ALGO_GBFS,
+    ALGO_ORDER, DEFAULT_ALGO,
+    TAB_COLORS,
+    KEY_TOGGLE_ALGO, KEY_SPEED_UP, KEY_SPEED_DOWN, KEY_RESTART,
 )
 
-def draw_path(surface, snake):
+# ── per-algo stats ────────────────────────────────────────────────────────────
+stats = {a: {"food": 0, "steps": 0, "best": 0} for a in ALGO_ORDER}
 
-    if not snake.path:
-        return
+ALGO_DESC = {
+    ALGO_BFS:  ["Explores ALL neighbours", "level by level.",
+                "Guarantees SHORTEST path.", "Slow on large grids."],
+    ALGO_ASTAR:["Uses Manhattan distance", "heuristic + path cost.",
+                "Optimal AND efficient.", "Best all-round choice."],
+    ALGO_DFS:  ["Explores DEEP first.", "Greedy neighbour order.",
+                "Fast but NOT optimal.", "Path can be long."],
+    ALGO_GBFS: ["Pure heuristic search.", "Ignores path cost.",
+                "Very fast to find food.", "Not guaranteed optimal."],
+}
 
-    for cell in snake.path:
-
-        x, y = cell
-
-        rect = cell_rect(x, y).inflate(-10, -10)
-
-        pygame.draw.rect(surface, (100, 200, 255), rect, border_radius=3)
+# ── helpers ───────────────────────────────────────────────────────────────────
 def cell_rect(x, y):
     return pygame.Rect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE)
 
 
-def draw_grid(surface):
+def lerp_color(c1, c2, t):
+    return tuple(int(c1[i] + (c2[i]-c1[i])*t) for i in range(3))
 
+
+def draw_grid(surface):
     for x in range(COLS + 1):
         pygame.draw.line(surface, GRID_COLOR,
-                         (x * CELL_SIZE, 0),
-                         (x * CELL_SIZE, ROWS * CELL_SIZE))
-
+                         (x*CELL_SIZE, 0), (x*CELL_SIZE, ROWS*CELL_SIZE))
     for y in range(ROWS + 1):
         pygame.draw.line(surface, GRID_COLOR,
-                         (0, y * CELL_SIZE),
-                         (COLS * CELL_SIZE, y * CELL_SIZE))
+                         (0, y*CELL_SIZE), (COLS*CELL_SIZE, y*CELL_SIZE))
 
 
-def draw_snake(surface, snake):
+def draw_path(surface, snake, algo):
+    if not snake.path:
+        return
+    color = TAB_COLORS[algo]
+    for i, cell in enumerate(snake.path[1:], 1):
+        t = i / max(len(snake.path)-1, 1)
+        c = lerp_color(color, (30, 30, 50), t)
+        rect = cell_rect(*cell).inflate(-12, -12)
+        pygame.draw.rect(surface, c, rect, border_radius=4)
+
+
+def draw_snake(surface, snake, algo):
+    head_color = TAB_COLORS[algo]
+    body_color = lerp_color(TAB_COLORS[algo], (10, 10, 20), 0.6)
 
     for i, cell in enumerate(snake.body):
-
         rect = cell_rect(*cell).inflate(-2, -2)
+        color = head_color if i == 0 else body_color
+        pygame.draw.rect(surface, color, rect, border_radius=5)
 
-        color = SNAKE_HEAD_COLOR if i == 0 else SNAKE_BODY_COLOR
+        # subtle inner glow on head
+        if i == 0:
+            inner = rect.inflate(-6, -6)
+            glow = lerp_color(head_color, (255,255,255), 0.4)
+            pygame.draw.rect(surface, glow, inner, border_radius=3)
 
-        pygame.draw.rect(surface, color, rect, border_radius=4)
-
-    # Snake eyes
+    # eyes
     hx, hy = snake.body[0]
+    cx = hx*CELL_SIZE + CELL_SIZE//2
+    cy = hy*CELL_SIZE + CELL_SIZE//2
+    pygame.draw.circle(surface, (0,0,0), (cx-4, cy-4), 3)
+    pygame.draw.circle(surface, (0,0,0), (cx+4, cy-4), 3)
+    pygame.draw.circle(surface, (255,255,255), (cx-3, cy-5), 1)
+    pygame.draw.circle(surface, (255,255,255), (cx+5, cy-5), 1)
 
-    cx = hx * CELL_SIZE + CELL_SIZE // 2
-    cy = hy * CELL_SIZE + CELL_SIZE // 2
 
-    pygame.draw.circle(surface, BG_COLOR, (cx - 4, cy - 4), 2)
-    pygame.draw.circle(surface, BG_COLOR, (cx + 4, cy - 4), 2)
-
-
-def draw_food(surface, food):
-
+def draw_food(surface, food, tick):
     x, y = food.position
+    cx = x*CELL_SIZE + CELL_SIZE//2
+    cy = y*CELL_SIZE + CELL_SIZE//2
+    pulse = abs(math.sin(tick * 0.05)) * 3
+    pygame.draw.circle(surface, (180, 30, 30), (cx, cy), int(CELL_SIZE//2 - 1 + pulse))
+    pygame.draw.circle(surface, FOOD_COLOR,   (cx, cy), int(CELL_SIZE//2 - 3 + pulse))
+    pygame.draw.circle(surface, (255,200,200),(cx-2, cy-3), 2)
 
-    cx = x * CELL_SIZE + CELL_SIZE // 2
-    cy = y * CELL_SIZE + CELL_SIZE // 2
 
-    pygame.draw.circle(surface, FOOD_COLOR, (cx, cy), CELL_SIZE // 2 - 2)
+# ── TAB BAR ───────────────────────────────────────────────────────────────────
+TAB_H    = 44
+TAB_W    = PANEL_WIDTH // len(ALGO_ORDER)
+
+def draw_tabs(surface, font_tab, algo):
+    px = COLS * CELL_SIZE
+    # tab bar background
+    pygame.draw.rect(surface, (8, 8, 16), (px, 0, PANEL_WIDTH, TAB_H))
+
+    for i, a in enumerate(ALGO_ORDER):
+        tx  = px + i * TAB_W
+        col = TAB_COLORS[a]
+        active = (a == algo)
+
+        # tab background
+        bg = col if active else (20, 20, 32)
+        pygame.draw.rect(surface, bg, (tx, 0, TAB_W, TAB_H))
+
+        # top accent bar
+        pygame.draw.rect(surface, col if active else (40,40,60),
+                         (tx, 0, TAB_W, 3))
+
+        # divider
+        pygame.draw.line(surface, (40,40,60), (tx, 0), (tx, TAB_H))
+
+        # label
+        tc = (0,0,0) if active else col
+        lbl = font_tab.render(a, True, tc)
+        lx  = tx + (TAB_W - lbl.get_width()) // 2
+        ly  = (TAB_H - lbl.get_height()) // 2
+        surface.blit(lbl, (lx, ly))
+
+    # bottom border
+    pygame.draw.line(surface, (40,40,60),
+                     (px, TAB_H), (px+PANEL_WIDTH, TAB_H))
 
 
-def draw_panel(surface, font, snake, algo, fps):
+# ── SIDE PANEL ────────────────────────────────────────────────────────────────
+def draw_panel(surface, fonts, snake, algo, fps, tick):
+    font_sm, font_md, font_lg, font_tab = fonts
+    px  = COLS * CELL_SIZE
+    col = TAB_COLORS[algo]
 
-    panel_x = COLS * CELL_SIZE
+    # background
+    pygame.draw.rect(surface, PANEL_BG, (px, TAB_H, PANEL_WIDTH, WINDOW_H - TAB_H))
 
-    pygame.draw.rect(surface, PANEL_BG,
-                     (panel_x, 0, PANEL_WIDTH, WINDOW_H))
+    # subtle left border glow
+    for i in range(4):
+        alpha_surf = pygame.Surface((2, WINDOW_H - TAB_H), pygame.SRCALPHA)
+        alpha_surf.fill((*col, 60 - i*15))
+        surface.blit(alpha_surf, (px + i, TAB_H))
 
-    y = 20
+    y = TAB_H + 18
 
-    lines = [
-        "SNAKE AI",
-        "",
-        f"Score: {snake.score}",
-        f"Length: {len(snake.body)}",
-        "",
-        f"Algorithm: {algo}",
-        "",
-        "BFS → explores all nodes",
-        "A*  → heuristic search",
-        "",
-        f"Speed: {fps} FPS",
-        "",
-        "Controls",
-        "TAB → Switch Algo",
-        "+ / - → Speed",
-        "R → Restart"
+    # ── algo name big ────────────────────────────────────────────────────────
+    name_surf = font_lg.render(algo, True, col)
+    surface.blit(name_surf, (px + 20, y))
+    y += name_surf.get_height() + 4
+
+    # full name subtitle
+    full = {"BFS": "Breadth-First Search", "A*": "A-Star Search",
+            "DFS": "Depth-First Search",   "GBFS": "Greedy Best-First"}
+    sub = font_sm.render(full[algo], True, (120,120,150))
+    surface.blit(sub, (px + 22, y))
+    y += 26
+
+    # divider
+    pygame.draw.line(surface, (40,40,60), (px+16, y), (px+PANEL_WIDTH-16, y))
+    y += 14
+
+    # ── score card ───────────────────────────────────────────────────────────
+    card_rect = pygame.Rect(px+14, y, PANEL_WIDTH-28, 64)
+    pygame.draw.rect(surface, (18,18,30), card_rect, border_radius=8)
+    pygame.draw.rect(surface, col, card_rect, 1, border_radius=8)
+
+    sc = font_lg.render(str(snake.score), True, col)
+    surface.blit(sc, (px + 26, y + 8))
+    sl = font_sm.render("SCORE", True, (100,100,130))
+    surface.blit(sl, (px + 26, y + 8 + sc.get_height()))
+
+    ln = font_lg.render(str(len(snake.body)), True, (180,180,220))
+    surface.blit(ln, (px + PANEL_WIDTH//2 + 10, y + 8))
+    ll = font_sm.render("LENGTH", True, (100,100,130))
+    surface.blit(ll, (px + PANEL_WIDTH//2 + 10, y + 8 + ln.get_height()))
+
+    y += 80
+
+    # ── description ──────────────────────────────────────────────────────────
+    for line in ALGO_DESC[algo]:
+        t = font_sm.render(line, True, (160,160,190))
+        surface.blit(t, (px+20, y))
+        y += 20
+    y += 8
+
+    # divider
+    pygame.draw.line(surface, (40,40,60), (px+16, y), (px+PANEL_WIDTH-16, y))
+    y += 14
+
+    # ── session stats for THIS algo ──────────────────────────────────────────
+    st = stats[algo]
+    header = font_sm.render("SESSION STATS", True, (100,100,130))
+    surface.blit(header, (px+20, y))
+    y += 20
+
+    rows_data = [
+        ("Food eaten",  str(st["food"])),
+        ("Steps taken", str(st["steps"])),
+        ("Best score",  str(st["best"])),
     ]
+    for label, val in rows_data:
+        lsurf = font_sm.render(label, True, (140,140,170))
+        vsurf = font_sm.render(val,   True, col)
+        surface.blit(lsurf, (px+20,  y))
+        surface.blit(vsurf, (px+PANEL_WIDTH-20-vsurf.get_width(), y))
+        y += 22
+    y += 6
 
-    for line in lines:
+    # divider
+    pygame.draw.line(surface, (40,40,60), (px+16, y), (px+PANEL_WIDTH-16, y))
+    y += 14
 
-        color = ACCENT_COLOR if "Algorithm" in line else TEXT_COLOR
+    # ── speed bar ────────────────────────────────────────────────────────────
+    spd_lbl = font_sm.render(f"SPEED  {fps} FPS", True, (140,140,170))
+    surface.blit(spd_lbl, (px+20, y))
+    y += 20
+    bar_w = PANEL_WIDTH - 32
+    bar_fill = int(bar_w * (FPS_OPTIONS.index(fps) / (len(FPS_OPTIONS)-1)))
+    pygame.draw.rect(surface, (30,30,46), (px+16, y, bar_w, 6), border_radius=3)
+    pygame.draw.rect(surface, col,        (px+16, y, bar_fill, 6), border_radius=3)
+    y += 22
 
-        text = font.render(line, True, color)
+    # divider
+    pygame.draw.line(surface, (40,40,60), (px+16, y), (px+PANEL_WIDTH-16, y))
+    y += 14
 
-        surface.blit(text, (panel_x + 20, y))
+    # ── controls ─────────────────────────────────────────────────────────────
+    ctrl_lbl = font_sm.render("CONTROLS", True, (100,100,130))
+    surface.blit(ctrl_lbl, (px+20, y))
+    y += 20
 
-        y += 28
+    controls = [
+        ("TAB",   "Switch algorithm"),
+        ("+ / -", "Change speed"),
+        ("R",     "Restart game"),
+    ]
+    for key, desc in controls:
+        k = font_sm.render(key,  True, col)
+        d = font_sm.render(desc, True, (150,150,180))
+        # key badge
+        badge = pygame.Rect(px+16, y-2, k.get_width()+10, k.get_height()+4)
+        pygame.draw.rect(surface, (28,28,44), badge, border_radius=4)
+        pygame.draw.rect(surface, col, badge, 1, border_radius=4)
+        surface.blit(k, (px+21, y))
+        surface.blit(d, (px+16+badge.width+8, y))
+        y += 24
+
+    # ── fallback indicator ───────────────────────────────────────────────────
+    if snake.used_fallback:
+        y += 8
+        fb = font_sm.render("⚠ NO PATH — random move", True, (255,180,0))
+        surface.blit(fb, (px+20, y))
 
 
-def draw_game_over(surface, bfs_food, astar_food, bfs_steps, astar_steps):
+# ── GAME OVER SCREEN ──────────────────────────────────────────────────────────
+def draw_game_over(surface, fonts, algo):
+    font_sm, font_md, font_lg, font_tab = fonts
 
-    overlay = pygame.Surface((WINDOW_W, WINDOW_H))
-    overlay.set_alpha(200)
-    overlay.fill((0, 0, 0))
-
+    overlay = pygame.Surface((WINDOW_W, WINDOW_H), pygame.SRCALPHA)
+    overlay.fill((0, 0, 8, 210))
     surface.blit(overlay, (0, 0))
 
-    big_font = pygame.font.SysFont("arial", 50)
-    font = pygame.font.SysFont("arial", 25)
+    cx = (COLS * CELL_SIZE) // 2
 
-    title = big_font.render("GAME OVER", True, (255, 60, 60))
-    surface.blit(title, (WINDOW_W//2 - title.get_width()//2, 80))
+    # title
+    title = font_lg.render("GAME  OVER", True, (255, 60, 60))
+    surface.blit(title, (cx - title.get_width()//2, 60))
 
-    y = 200
+    # subtitle
+    sub = font_md.render("Algorithm Comparison", True, (180,180,220))
+    surface.blit(sub, (cx - sub.get_width()//2, 120))
 
-    lines = [
-        "Algorithm Comparison",
-        "",
-        f"BFS  → Steps: {bfs_steps} | Food: {bfs_food}",
-        f"A*   → Steps: {astar_steps} | Food: {astar_food}",
-        ""
-    ]
+    # table
+    y = 165
+    col_w = (COLS * CELL_SIZE - 40) // 4
+    headers = ["ALGO", "FOOD", "STEPS", "BEST"]
+    hx = 20
+    for h in headers:
+        hs = font_sm.render(h, True, (120,120,150))
+        surface.blit(hs, (hx, y))
+        hx += col_w
+    y += 22
 
-    if astar_food > bfs_food:
-        lines.append("Better Algorithm: A*")
-    elif bfs_food > astar_food:
-        lines.append("Better Algorithm: BFS")
-    else:
-        lines.append("Both performed equally")
+    pygame.draw.line(surface, (60,60,80), (20, y), (COLS*CELL_SIZE-20, y))
+    y += 10
 
-    lines.append("")
-    lines.append("Press R to Restart")
+    best_food = max(stats[a]["food"] for a in ALGO_ORDER)
 
-    for line in lines:
+    for a in ALGO_ORDER:
+        st   = stats[a]
+        col  = TAB_COLORS[a]
+        is_best = (st["food"] == best_food and best_food > 0)
 
-        text = font.render(line, True, (255,255,255))
+        rx = 20
+        # row highlight if best
+        if is_best:
+            pygame.draw.rect(surface, (20,20,40),
+                             (16, y-4, COLS*CELL_SIZE-32, 26), border_radius=4)
+            pygame.draw.rect(surface, col,
+                             (16, y-4, COLS*CELL_SIZE-32, 26), 1, border_radius=4)
 
-        surface.blit(text, (WINDOW_W//2 - 180, y))
+        for val in [a, str(st["food"]), str(st["steps"]), str(st["best"])]:
+            c = col if is_best else (180,180,210)
+            vs = font_sm.render(val, True, c)
+            surface.blit(vs, (rx, y))
+            rx += col_w
 
-        y += 35
+        if is_best:
+            star = font_sm.render("★ WINNER", True, col)
+            surface.blit(star, (rx - col_w//2, y))
+        y += 30
+
+    y += 10
+    restart = font_md.render("Press  R  to Restart", True, (200,200,230))
+    surface.blit(restart, (cx - restart.get_width()//2, y))
 
 
+# ── MAIN ─────────────────────────────────────────────────────────────────────
 def new_game(algo):
-
     snake = Snake(algo=algo)
-
-    food = Food()
-
+    food  = Food()
     food.respawn(set(snake.body))
-
     return snake, food
 
 
 def main():
-
     pygame.init()
-
-    pygame.display.set_caption("Snake AI — BFS & A*")
-
+    pygame.display.set_caption("Snake AI  —  BFS  |  A*  |  DFS  |  GBFS")
     screen = pygame.display.set_mode((WINDOW_W, WINDOW_H))
+    clock  = pygame.time.Clock()
 
-    clock = pygame.time.Clock()
+    # fonts
+    font_sm  = pygame.font.SysFont("consolas", 13)
+    font_md  = pygame.font.SysFont("consolas", 18, bold=True)
+    font_lg  = pygame.font.SysFont("consolas", 26, bold=True)
+    font_tab = pygame.font.SysFont("consolas", 14, bold=True)
+    fonts    = (font_sm, font_md, font_lg, font_tab)
 
-    font = pygame.font.SysFont("arial", 20)
-
-    algo = DEFAULT_ALGO
-
+    algo      = DEFAULT_ALGO
     fps_index = DEFAULT_FPS
-
     snake, food = new_game(algo)
-
-    # Algorithm statistics
-    bfs_food = 0
-    astar_food = 0
-    bfs_steps = 0
-    astar_steps = 0
+    tick = 0
 
     while True:
 
-        # EVENTS
+        # ── EVENTS ───────────────────────────────────────────────────────────
         for event in pygame.event.get():
 
             if event.type == pygame.QUIT:
@@ -204,11 +358,10 @@ def main():
 
                 if event.key == KEY_RESTART:
                     snake, food = new_game(algo)
-                    bfs_food = astar_food = bfs_steps = astar_steps = 0
 
                 elif event.key == KEY_TOGGLE_ALGO:
-
-                    algo = ALGO_BFS if algo == ALGO_ASTAR else ALGO_ASTAR
+                    idx  = ALGO_ORDER.index(algo)
+                    algo = ALGO_ORDER[(idx + 1) % len(ALGO_ORDER)]
                     snake.algo = algo
 
                 elif event.key == KEY_SPEED_UP:
@@ -217,43 +370,41 @@ def main():
                 elif event.key == KEY_SPEED_DOWN:
                     fps_index = max(fps_index - 1, 0)
 
-        # UPDATE
+            # click on tabs
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                mx, my = event.pos
+                px = COLS * CELL_SIZE
+                if px <= mx <= px + PANEL_WIDTH and 0 <= my <= TAB_H:
+                    ti = (mx - px) // TAB_W
+                    if 0 <= ti < len(ALGO_ORDER):
+                        algo = ALGO_ORDER[ti]
+                        snake.algo = algo
+
+        # ── UPDATE ───────────────────────────────────────────────────────────
         if snake.alive:
-
             snake.step(food.position)
-
-            if snake.algo == ALGO_BFS:
-                bfs_steps += 1
-            else:
-                astar_steps += 1
+            stats[algo]["steps"] += 1
 
             if snake.head == food.position:
-
-                if snake.algo == ALGO_BFS:
-                    bfs_food += 1
-                else:
-                    astar_food += 1
-
+                stats[algo]["food"] += 1
+                stats[algo]["best"] = max(stats[algo]["best"], snake.score)
                 food.respawn(set(snake.body))
 
-        # DRAW
+        tick += 1
+
+        # ── DRAW ─────────────────────────────────────────────────────────────
         screen.fill(BG_COLOR)
-
         draw_grid(screen)
-
-        draw_food(screen, food)
-
-        draw_path(screen, snake)
-
-        draw_snake(screen, snake)
-
-        draw_panel(screen, font, snake, algo, FPS_OPTIONS[fps_index])
+        draw_food(screen, food, tick)
+        draw_path(screen, snake, algo)
+        draw_snake(screen, snake, algo)
+        draw_tabs(screen, font_tab, algo)
+        draw_panel(screen, fonts, snake, algo, FPS_OPTIONS[fps_index], tick)
 
         if not snake.alive:
-            draw_game_over(screen, bfs_food, astar_food, bfs_steps, astar_steps)
+            draw_game_over(screen, fonts, algo)
 
         pygame.display.flip()
-
         clock.tick(FPS_OPTIONS[fps_index])
 
 
